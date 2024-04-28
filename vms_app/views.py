@@ -1,144 +1,140 @@
 from django.db.models import Avg, Count
-from django.http import JsonResponse
-from rest_framework import generics
-from rest_framework.response import Response
-from rest_framework.decorators import api_view
-from rest_framework.permissions import IsAuthenticated
-from .models import Vendor, PurchaseOrder, HistoricalPerformance
-from .serializers import VendorSerializer, PurchaseOrderSerializer
 from django.utils import timezone
-from django.db.models.signals import post_save, pre_delete
-from django.dispatch import receiver
+from rest_framework import status
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from .models import Vendor, PurchaseOrder
+from .serializers import VendorSerializer, PurchaseOrderSerializer
 
-class VendorListCreateAPIView(generics.ListCreateAPIView):
-    queryset = Vendor.objects.all()
-    serializer_class = VendorSerializer
+# Vendor Profile Management
 
-class VendorRetrieveUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Vendor.objects.all()
-    serializer_class = VendorSerializer
-    lookup_field = 'pk'
+@api_view(['GET', 'POST'])
+def vendor_list(request):
+    if request.method == 'GET':
+        vendors = Vendor.objects.all()
+        serializer = VendorSerializer(vendors, many=True)
+        return Response(serializer.data)
 
-class PurchaseOrderListCreateAPIView(generics.ListCreateAPIView):
-    queryset = PurchaseOrder.objects.all()
-    serializer_class = PurchaseOrderSerializer
+    elif request.method == 'POST':
+        serializer = VendorSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-class PurchaseOrderRetrieveUpdateDeleteAPIView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = PurchaseOrder.objects.all()
-    serializer_class = PurchaseOrderSerializer
-    lookup_field = 'pk'
+@api_view(['GET', 'PUT', 'DELETE'])
+def vendor_detail(request, vendor_id):
+    try:
+        vendor = Vendor.objects.get(pk=vendor_id)
+    except Vendor.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = VendorSerializer(vendor)
+        return Response(serializer.data)
+
+    elif request.method == 'PUT':
+        serializer = VendorSerializer(vendor, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        vendor.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# Purchase Order Tracking
+
+@api_view(['GET', 'POST'])
+def purchase_order_list(request):
+    if request.method == 'GET':
+        purchase_orders = PurchaseOrder.objects.all()
+        serializer = PurchaseOrderSerializer(purchase_orders, many=True)
+        return Response(serializer.data)
+
+    elif request.method == 'POST':
+        serializer = PurchaseOrderSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET', 'PUT', 'DELETE'])
+def purchase_order_detail(request, po_id):
+    try:
+        purchase_order = PurchaseOrder.objects.get(pk=po_id)
+    except PurchaseOrder.DoesNotExist:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        serializer = PurchaseOrderSerializer(purchase_order)
+        return Response(serializer.data)
+
+    elif request.method == 'PUT':
+        serializer = PurchaseOrderSerializer(purchase_order, data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    elif request.method == 'DELETE':
+        purchase_order.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# Vendor Performance Evaluation
 
 @api_view(['GET'])
-def vendor_performance(request, pk):
+def vendor_performance(request, vendor_id):
     try:
-        vendor = Vendor.objects.get(pk=pk)
+        vendor = Vendor.objects.get(pk=vendor_id)
     except Vendor.DoesNotExist:
-        return Response(status=404)
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    # Calculate On-Time Delivery Rate
+    completed_pos = PurchaseOrder.objects.filter(vendor=vendor, status='completed')
+    total_completed_pos = completed_pos.count()
+    on_time_pos = completed_pos.filter(delivery_date__lte=timezone.now())
+    on_time_delivery_rate = (on_time_pos.count() / total_completed_pos) * 100 if total_completed_pos > 0 else 0
+
+    # Calculate Quality Rating Average
+    quality_rating_avg = PurchaseOrder.objects.filter(vendor=vendor, quality_rating__isnull=False).aggregate(avg_rating=Avg('quality_rating'))['avg_rating'] or 0
+
+    # Calculate Average Response Time
+    response_time_avg = PurchaseOrder.objects.filter(vendor=vendor, acknowledgment_date__isnull=False).aggregate(avg_response_time=Avg('acknowledgment_date' - 'issue_date'))['avg_response_time'] or 0
+
+    # Calculate Fulfilment Rate
+    fulfilled_pos = PurchaseOrder.objects.filter(vendor=vendor, status='completed')
+    total_pos = PurchaseOrder.objects.filter(vendor=vendor)
+    fulfilment_rate = (fulfilled_pos.count() / total_pos.count()) * 100 if total_pos.count() > 0 else 0
 
     data = {
-        'on_time_delivery_rate': vendor.on_time_delivery_rate,
-        'quality_rating_avg': vendor.quality_rating_avg,
-        'average_response_time': vendor.average_response_time,
-        'fulfillment_rate': vendor.fulfillment_rate
+        'on_time_delivery_rate': on_time_delivery_rate,
+        'quality_rating_avg': quality_rating_avg,
+        'response_time_avg': response_time_avg,
+        'fulfilment_rate': fulfilment_rate
     }
     return Response(data)
 
+
+# Update Acknowledgment Endpoint
+
 @api_view(['POST'])
-def acknowledge_purchase_order(request, pk):
+def acknowledge_purchase_order(request, po_id):
     try:
-        purchase_order = PurchaseOrder.objects.get(pk=pk)
+        purchase_order = PurchaseOrder.objects.get(pk=po_id)
     except PurchaseOrder.DoesNotExist:
-        return Response(status=404)
+        return Response(status=status.HTTP_404_NOT_FOUND)
 
     if request.method == 'POST':
-        purchase_order.acknowledgment_date = timezone.now()  # Use timezone.now()
+        purchase_order.acknowledgment_date = timezone.now()
         purchase_order.save()
 
-        # Trigger recalculation of average_response_time
-        update_vendor_average_response_time(purchase_order.vendor)
+        # Recalculate average_response_time
+        response_time_avg = PurchaseOrder.objects.filter(vendor=purchase_order.vendor, acknowledgment_date__isnull=False).aggregate(avg_response_time=Avg('acknowledgment_date' - 'issue_date'))['avg_response_time'] or 0
+        purchase_order.vendor.average_response_time = response_time_avg
+        purchase_order.vendor.save()
 
-        return Response(status=200)
-
-# Backend Logic for Performance Metrics
-
-def update_vendor_on_time_delivery_rate(vendor):
-    completed_orders = PurchaseOrder.objects.filter(vendor=vendor, status='completed')
-    on_time_delivered_orders = completed_orders.filter(delivery_date__lte=F('acknowledgment_date'))
-    on_time_delivery_rate = (on_time_delivered_orders.count() / completed_orders.count()) * 100
-    vendor.on_time_delivery_rate = on_time_delivery_rate
-    vendor.save()
-
-def update_vendor_quality_rating_avg(vendor):
-    completed_orders = PurchaseOrder.objects.filter(vendor=vendor, status='completed', quality_rating__isnull=False)
-    if completed_orders.exists():
-        quality_rating_avg = completed_orders.aggregate(Avg('quality_rating'))['quality_rating__avg']
-        vendor.quality_rating_avg = quality_rating_avg
-        vendor.save()
-
-def update_vendor_average_response_time(vendor):
-    completed_orders = PurchaseOrder.objects.filter(vendor=vendor, acknowledgment_date__isnull=False)
-    response_times = [(po.acknowledgment_date - po.issue_date).total_seconds() for po in completed_orders]
-    if response_times:
-        average_response_time = sum(response_times) / len(response_times)
-        vendor.average_response_time = average_response_time
-        vendor.save()
-
-def update_vendor_fulfillment_rate(vendor):
-    all_orders = PurchaseOrder.objects.filter(vendor=vendor)
-    successful_orders = all_orders.filter(status='completed')
-    fulfillment_rate = (successful_orders.count() / all_orders.count()) * 100
-    vendor.fulfillment_rate = fulfillment_rate
-    vendor.save()
-
-def update_historical_performance(vendor):
-    historical_data = HistoricalPerformance.objects.filter(vendor=vendor)
-    latest_record = historical_data.latest('date') if historical_data.exists() else None
-
-    on_time_delivery_rate = vendor.on_time_delivery_rate
-    quality_rating_avg = vendor.quality_rating_avg
-    average_response_time = vendor.average_response_time
-    fulfillment_rate = vendor.fulfillment_rate
-
-    if not latest_record or latest_record.on_time_delivery_rate != on_time_delivery_rate \
-            or latest_record.quality_rating_avg != quality_rating_avg \
-            or latest_record.average_response_time != average_response_time \
-            or latest_record.fulfillment_rate != fulfillment_rate:
-        
-        HistoricalPerformance.objects.create(
-            vendor=vendor,
-            on_time_delivery_rate=on_time_delivery_rate,
-            quality_rating_avg=quality_rating_avg,
-            average_response_time=average_response_time,
-            fulfillment_rate=fulfillment_rate
-        )
-
-    return
-
-# Signals
-from django.db.models.signals import post_save, pre_delete
-from django.dispatch import receiver
-
-@receiver(post_save, sender=PurchaseOrder)
-def update_vendor_performance_on_po_create(sender, instance, created, **kwargs):
-    if created:
-        update_vendor_on_time_delivery_rate(instance.vendor)
-        update_vendor_quality_rating_avg(instance.vendor)
-        update_vendor_average_response_time(instance.vendor)
-        update_vendor_fulfillment_rate(instance.vendor)
-        update_historical_performance(instance.vendor)
-
-@receiver(post_save, sender=PurchaseOrder)
-def update_vendor_performance_on_po_update(sender, instance, **kwargs):
-    update_vendor_on_time_delivery_rate(instance.vendor)
-    update_vendor_quality_rating_avg(instance.vendor)
-    update_vendor_average_response_time(instance.vendor)
-    update_vendor_fulfillment_rate(instance.vendor)
-    update_historical_performance(instance.vendor)
-
-@receiver(pre_delete, sender=PurchaseOrder)
-def update_vendor_performance_on_po_delete(sender, instance, **kwargs):
-    update_vendor_on_time_delivery_rate(instance.vendor)
-    update_vendor_quality_rating_avg(instance.vendor)
-    update_vendor_average_response_time(instance.vendor)
-    update_vendor_fulfillment_rate(instance.vendor)
-    update_historical_performance(instance.vendor)
+        return Response(status=status.HTTP_200_OK)
